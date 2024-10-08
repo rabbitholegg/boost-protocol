@@ -10,6 +10,7 @@ jobs:
     timeout-minutes: 15
     env:
       VITE_ALCHEMY_API_KEY: ${{ secrets.VITE_ALCHEMY_API_KEY }}
+      HARDHAT_KEEPALIVE: 'true'
 
     steps:
       - name: Checkout
@@ -35,4 +36,4 @@ jobs:
         with:
           timeout_minutes: 20
           max_attempts: 3
-          command: npx turbo test:ci --cache-dir=".cache" --concurrency=1 --filter="./examples/zora-mint"
+          command: npx turbo test:ci --cache-dir=".cache" --concurrency=1 --filter="./examples/*" || kill $(lsof -t -i:8545)

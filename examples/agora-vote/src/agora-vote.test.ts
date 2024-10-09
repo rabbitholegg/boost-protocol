@@ -35,7 +35,7 @@ import { optimism } from 'viem/chains';
 import { beforeAll, describe, expect, test } from 'vitest';
 
 const walletClient = createTestClient({
-  transport: http('http://127.0.0.1:8545'),
+  transport: http('http://localhost:8545'),
   chain: optimism,
   mode: 'hardhat',
 })

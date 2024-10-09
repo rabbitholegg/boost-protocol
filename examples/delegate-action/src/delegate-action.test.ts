@@ -57,7 +57,7 @@ const selector = selectors[
 ] as Hex;
 
 const walletClient = createTestClient({
-  transport: http("http://127.0.0.1:8545"),
+  transport: http('http://localhost:8545'),
   chain: base,
   mode: "hardhat",
 })

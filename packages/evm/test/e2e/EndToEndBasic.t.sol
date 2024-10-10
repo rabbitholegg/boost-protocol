@@ -144,6 +144,15 @@ contract EndToEndBasic is Test {
 
         // - Max Participants == 5
         assertEq(boost.maxParticipants, 5);
+
+        // - ClawbackFromIncentive
+        // reverts on underflow
+        vm.expectRevert();
+        budget.clawbackFromIncentive(boost.incentives[0], abi.encode(500 ether + 1));
+
+        // can clawback funds from incentive
+        budget.clawbackFromIncentive(boost.incentives[0], abi.encode(500 ether));
+        assertEq(erc20.balanceOf(address(budget)), 500 ether);
     }
 
     /// @notice As a user, I want to complete a Boost so that I can earn the rewards.
@@ -301,7 +310,7 @@ contract EndToEndBasic is Test {
                 )
             ),
             // "... of '100 ERC20' with a max of 5 participants"
-            parameters: abi.encode(erc20, AERC20Incentive.Strategy.POOL, 100 ether, 5)
+            parameters: abi.encode(erc20, AERC20Incentive.Strategy.POOL, 100 ether, 5, address(budget))
         });
 
         return core.createBoost(

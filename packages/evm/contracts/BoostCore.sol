@@ -34,7 +34,6 @@ contract BoostCore is Ownable, ReentrancyGuard {
         BoostLib.Target allowList;
         BoostLib.Target[] incentives;
         uint64 protocolFee;
-        uint64 referralFee;
         uint256 maxParticipants;
         address owner;
     }
@@ -64,14 +63,8 @@ contract BoostCore is Ownable, ReentrancyGuard {
     /// @notice The protocol fee receiver
     address public protocolFeeReceiver;
 
-    /// @notice The claim fee (in wei)
-    uint256 public claimFee = 0.000075 ether;
-
     /// @notice The base protocol fee (in bps)
     uint64 public protocolFee = 1_000; // 10%
-
-    /// @notice The base referral fee (in bps)
-    uint64 public referralFee = 1_000; // 10%
 
     /// @notice The fee denominator (basis points, i.e. 10000 == 100%)
     uint64 public constant FEE_DENOMINATOR = 10_000;
@@ -91,7 +84,7 @@ contract BoostCore is Ownable, ReentrancyGuard {
     }
 
     /// @notice Create a new Boost
-    /// @param data_ The compressed data for the Boost `(ABudget, Target<AAction>, Target<Validator>, Target<AAllowList>, Target<AIncentive>[], protocolFee, referralFee, maxParticipants, owner)`
+    /// @param data_ The compressed data for the Boost `(ABudget, Target<AAction>, Target<Validator>, Target<AAllowList>, Target<AIncentive>[], protocolFee, maxParticipants, owner)`
     /// @dev The data is expected to:
     ///     - be packed using `abi.encode()` and compressed using [Solady's LibZip calldata compression](https://github.com/Vectorized/solady/blob/main/src/utils/LibZip.sol)
     ///     - properly decode to the following types (in order):
@@ -104,7 +97,6 @@ contract BoostCore is Ownable, ReentrancyGuard {
     ///         - `Target` for the allowList
     ///         - `Target[]` for the incentives
     ///         - `uint256` for the protocolFee (added to the base protocol fee)
-    ///         - `uint256` for the referralFee (added to the base referral fee)
     ///         - `uint256` for the maxParticipants
     ///         - `address` for the owner of the Boost
     function createBoost(bytes calldata data_)
@@ -123,7 +115,6 @@ contract BoostCore is Ownable, ReentrancyGuard {
         boost.owner = payload_.owner;
         boost.budget = payload_.budget;
         boost.protocolFee = protocolFee + payload_.protocolFee;
-        boost.referralFee = referralFee + payload_.referralFee;
         boost.maxParticipants = payload_.maxParticipants;
 
         // Setup the Boost components
@@ -178,8 +169,6 @@ contract BoostCore is Ownable, ReentrancyGuard {
         address claimant
     ) public payable nonReentrant {
         BoostLib.Boost storage boost = _boosts[boostId_];
-        if (msg.value < claimFee) revert BoostError.InsufficientFunds(address(0), msg.value, claimFee);
-        _routeClaimFee(boost, referrer_);
 
         if (!boost.allowList.isAllowed(claimant, data_)) revert BoostError.Unauthorized();
 
@@ -217,25 +206,11 @@ contract BoostCore is Ownable, ReentrancyGuard {
         protocolFeeReceiver = protocolFeeReceiver_;
     }
 
-    /// @notice Set the claim fee
-    /// @param claimFee_ The new claim fee (in wei)
-    /// @dev This function is only callable by the owner
-    function setClaimFee(uint256 claimFee_) external onlyOwner {
-        claimFee = claimFee_;
-    }
-
     /// @notice Set the protocol fee
     /// @param protocolFee_ The new protocol fee (in bps)
     /// @dev This function is only callable by the owner
     function setProtocolFee(uint64 protocolFee_) external onlyOwner {
         protocolFee = protocolFee_;
-    }
-
-    /// @notice Set the referral fee
-    /// @param referralFee_ The new referral fee (in bps)
-    /// @dev This function is only callable by the owner
-    function setReferralFee(uint64 referralFee_) external onlyOwner {
-        referralFee = referralFee_;
     }
 
     /// @notice Check that the provided ABudget is valid and that the caller is authorized to use it
@@ -281,7 +256,7 @@ contract BoostCore is Ownable, ReentrancyGuard {
     {
         incentives = new AIncentive[](targets_.length);
         for (uint256 i = 0; i < targets_.length; i++) {
-            // Deploy the clone, but don't initialize until it we've preflighted
+            // Deploy the clone, but don't initialize until we've preflighted
             _checkTarget(type(AIncentive).interfaceId, targets_[i].instance);
 
             // Ensure the target is a base implementation (incentive clones are not reusable)
@@ -289,16 +264,69 @@ contract BoostCore is Ownable, ReentrancyGuard {
                 revert BoostError.InvalidInstance(type(AIncentive).interfaceId, targets_[i].instance);
             }
 
+            // Create the incentive instance
             incentives[i] = AIncentive(_makeTarget(type(AIncentive).interfaceId, targets_[i], false));
 
+            // Get the preflight data for the protocol fee and original disbursement
             bytes memory preflight = incentives[i].preflight(targets_[i].parameters);
             if (preflight.length != 0) {
-                // wake-disable-next-line reentrancy (false positive, entrypoint is nonReentrant)
+                // Protocol Fee disbursal
+                assert(budget_.disburse(_getFeeDisbursal(preflight)));
+                // Original disbursement call
                 assert(budget_.disburse(preflight));
             }
 
+            // Initialize the incentive instance after value has been trasnferred
             // wake-disable-next-line reentrancy (false positive, entrypoint is nonReentrant)
             incentives[i].initialize(targets_[i].parameters);
+        }
+    }
+
+    /// @notice Internal helper function to calculate the protocol fee and prepare the modified disbursal
+    /// @param preflight The encoded data for the original disbursement
+    /// @return The modified preflight data for the protocol fee disbursement
+    function _getFeeDisbursal(bytes memory preflight) internal view returns (bytes memory) {
+        // Decode the preflight data to extract the transfer details
+        ABudget.Transfer memory request = abi.decode(preflight, (ABudget.Transfer));
+
+        if (request.assetType == ABudget.AssetType.ERC20 || request.assetType == ABudget.AssetType.ETH) {
+            // Decode the fungible payload
+            ABudget.FungiblePayload memory payload = abi.decode(request.data, (ABudget.FungiblePayload));
+
+            // Calculate the protocol fee based on BIPS
+            uint256 feeAmount = (payload.amount * protocolFee) / FEE_DENOMINATOR;
+
+            // Create a new fungible payload for the protocol fee
+            ABudget.FungiblePayload memory feePayload = ABudget.FungiblePayload({amount: feeAmount});
+
+            // Modify the original request for the fee disbursal
+            request.data = abi.encode(feePayload);
+            request.target = address(this); // Set the target to BoostCore (this contract)
+
+            // Encode and return the modified request as bytes
+            return abi.encode(request);
+        } else if (request.assetType == ABudget.AssetType.ERC1155) {
+            // Decode the ERC1155 payload
+            ABudget.ERC1155Payload memory payload = abi.decode(request.data, (ABudget.ERC1155Payload));
+
+            // Calculate the protocol fee based on BIPS
+            uint256 feeAmount = (payload.amount * protocolFee) / FEE_DENOMINATOR;
+
+            // Create a new ERC1155 payload for the protocol fee
+            ABudget.ERC1155Payload memory feePayload = ABudget.ERC1155Payload({
+                tokenId: payload.tokenId,
+                amount: feeAmount,
+                data: payload.data // Keep the additional data unchanged
+            });
+
+            // Modify the original request for the fee disbursal
+            request.data = abi.encode(feePayload);
+            request.target = address(this); // Set the target to BoostCore (this contract)
+
+            // Encode and return the modified request as bytes
+            return abi.encode(request);
+        } else {
+            revert BoostError.NotImplemented();
         }
     }
 
@@ -309,24 +337,5 @@ contract BoostCore is Ownable, ReentrancyGuard {
             // wake-disable-next-line reentrancy (false positive, entrypoint is nonReentrant)
             ACloneable(instance).initialize(target_.parameters);
         }
-    }
-
-    /// @notice Route the claim fee to the creator, referrer, and protocol fee receiver
-    /// @param boost The Boost for which to route the claim fee
-    /// @param referrer_ The address of the referrer (if any)
-    function _routeClaimFee(BoostLib.Boost storage boost, address referrer_) internal {
-        if (claimFee == 0) return;
-        uint256 netFee = claimFee;
-
-        // If a referrer is provided, transfer the revshare and reduce the net fee
-        if (referrer_ != address(0)) {
-            uint256 referralShare = claimFee * boost.referralFee / FEE_DENOMINATOR;
-            netFee -= referralShare;
-            referrer_.safeTransferETH(referralShare);
-        }
-
-        // The remaining fee is split between the owner and the protocol
-        boost.owner.safeTransferETH(netFee / 2);
-        protocolFeeReceiver.safeTransferETH(address(this).balance);
     }
 }

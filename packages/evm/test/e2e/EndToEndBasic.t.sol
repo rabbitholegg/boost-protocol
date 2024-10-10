@@ -55,7 +55,6 @@ import {AValidator} from "contracts/validators/AValidator.sol";
  *         - Then 500 ERC20 should be debited from my budget
  *       - I can specify a list of allowed addresses
  *       - I can specify an additional protocol fee
- *       - I can specify an additional referral fee
  *       - I can specify a maximum number of participants
  *       - I can specify the owner of the Boost
  *       - Then the Boost should be live
@@ -139,9 +138,6 @@ contract EndToEndBasic is Test {
         // - Protocol Fee == 1,000 bps (custom fee) + 1,000 bps (base fee) = 2,000 bps = 20%
         assertEq(boost.protocolFee, 2_000);
 
-        // - Referral Fee == 500 bps (custom fee) + 1,000 bps (base fee) = 1,500 bps = 15%
-        assertEq(boost.referralFee, 1_500);
-
         // - Max Participants == 5
         assertEq(boost.maxParticipants, 5);
     }
@@ -163,9 +159,6 @@ contract EndToEndBasic is Test {
         uint256 boostId = 0; // This is the only Boost we've created = 0
         uint256 incentiveId = 0; // This is the only AIncentive in that Boost = 0
         uint256 tokenId = 1; // This is the tokenId we just minted = 1
-        core.claimIncentive{value: core.claimFee()}(
-            boostId, incentiveId, address(0), abi.encode(address(this), abi.encode(tokenId))
-        );
 
         // "non-allowlisted users cannot claim this boost"
         tokenId = 2;
@@ -176,12 +169,9 @@ contract EndToEndBasic is Test {
 
         vm.record();
 
-        uint256 fee = core.claimFee();
         startHoax(badClaimer);
         vm.expectRevert(BoostError.Unauthorized.selector);
-        core.claimIncentive{value: fee}(
-            boostId, incentiveId, address(0), abi.encode(address(this), abi.encode(tokenId))
-        );
+        core.claimIncentive(boostId, incentiveId, address(0), abi.encode(address(this), abi.encode(tokenId)));
 
         (bytes32[] memory reads, bytes32[] memory writes) = vm.accesses(address(boost.validator));
         assertEq(reads.length, 0);
@@ -227,7 +217,7 @@ contract EndToEndBasic is Test {
     function _when_I_allocate_assets_to_my_budget(ABudget budget) internal {
         // "When I allocate assets to my budget"
         // "And the asset is an ERC20 token"
-        erc20.approve(address(budget), 500 ether);
+        erc20.approve(address(budget), 550 ether);
         assertTrue(
             budget.allocate(
                 abi.encode(
@@ -235,15 +225,15 @@ contract EndToEndBasic is Test {
                         assetType: ABudget.AssetType.ERC20,
                         asset: address(erc20),
                         target: address(this),
-                        data: abi.encode(ABudget.FungiblePayload({amount: 500 ether}))
+                        data: abi.encode(ABudget.FungiblePayload({amount: 550 ether}))
                     })
                 )
             )
         );
 
         // "Then my budget's balance should reflect the transferred amount"
-        assertEq(erc20.balanceOf(address(budget)), 500 ether);
-        assertEq(budget.available(address(erc20)), 500 ether);
+        assertEq(erc20.balanceOf(address(budget)), 550 ether);
+        assertEq(budget.available(address(erc20)), 550 ether);
 
         // "When I allocate assets to my budget"
         // "And the asset is ETH"
@@ -348,7 +338,6 @@ contract EndToEndBasic is Test {
                         }),
                         incentives, // "I can specify the incentive..."
                         1_000, // "I can specify an additional protocol fee" => 1,000 bps == 10%
-                        500, // "I can specify an additional referral fee" => 500 bps == 5%
                         5, // "I can specify a maximum number of participants" => 5
                         address(1) // "I can specify the owner of the Boost" => address(1)
                     )
